@@ -183,7 +183,6 @@ def main():
     ti=str(adjusted_time[3])+":"+str(adjusted_time[4])+":"+str(adjusted_time[5])
 
     while True:
-        buz.value(1)
         display_time(adjusted_time)
         print(ti)
         
