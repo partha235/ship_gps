@@ -1,6 +1,7 @@
 import network
 from umqtt.simple import MQTTClient
 from machine import Pin, UART, SoftI2C
+import machine
 import ssd1306
 from utime import sleep, sleep_ms, time, localtime, mktime
 import ntptime as ntp
@@ -9,9 +10,9 @@ import urequests as requests
 
 # ✅ Adafruit IO Credentials
 ADAFRUIT_IO_URL = 'io.adafruit.com'
-ADAFRUIT_IO_USERNAME = 'adafruit_username'
-ADAFRUIT_IO_KEY = 'adafruit_key'
-FEED_NAME = "Feed"
+ADAFRUIT_IO_USERNAME = 'YOUR_USERNAME'    # ✅ Replace with actual username
+ADAFRUIT_IO_KEY = 'YOUR_ADAFRUIT_KEY'     # ✅ Replace with actual key
+FEED_NAME = "YOUR_FEED_NAME"              # ✅ Ensure the feed exists
 
 # ✅ Twilio SMS Credentials
 recipient_num = "+91xxxxxxxxxx"
@@ -35,8 +36,8 @@ buz = Pin(16, Pin.OUT)
 led = Pin(33, Pin.OUT)
 
 # ✅ Initialize Variables
-latitude = None
-longitude = None
+latitude = DEFAULT_LATITUDE
+longitude = DEFAULT_LONGITUDE
 gc.collect()
 
 # ✅ I2C and OLED Display
@@ -98,11 +99,20 @@ def convertToDegree(rawDegrees):
     except ValueError:
         return None
 
-# ✅ MQTT Setup
+# ✅ MQTT Setup with Reconnection
 def setup_mqtt():
-    client = MQTTClient(b'bps', ADAFRUIT_IO_URL, ADAFRUIT_IO_USERNAME, ADAFRUIT_IO_KEY, ssl=False)
-    client.connect()
-    return client
+    retries = 5
+    for attempt in range(1, retries + 1):
+        try:
+            client = MQTTClient(b'bps', ADAFRUIT_IO_URL, ADAFRUIT_IO_USERNAME, ADAFRUIT_IO_KEY, ssl=False)
+            client.connect()
+            print(f"MQTT Connected on attempt {attempt}")
+            return client
+        except OSError as e:
+            print(f"MQTT connection failed: {e}. Retrying ({attempt}/{retries})...")
+            sleep(2)
+    print("MQTT connection failed after retries. Restarting...")
+    machine.reset()  # Restart the ESP32 after multiple failures
 
 # ✅ Publish Location to MQTT
 def publish_location(client, latitude, longitude):
@@ -115,20 +125,6 @@ def publish_location(client, latitude, longitude):
         except Exception as e:
             print("Error publishing location:", e)
 
-# ✅ Send SMS via Twilio
-def send_sms(recipient, sender, message, auth_token, account_sid):
-    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-    data = f"To={recipient}&From={sender}&Body={message}"
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
-    try:
-        response = requests.post(url, data=data, auth=(account_sid, auth_token), headers=headers)
-        if response.status_code == 201:
-            print("SMS sent successfully!")
-        else:
-            print("Failed to send SMS:", response.text)
-    except Exception as e:
-        print("Error sending SMS:", e)
-
 # ✅ Local Time with Time Zone Adjustment
 def get_local_time():
     utc_time = localtime()
@@ -136,7 +132,7 @@ def get_local_time():
     return localtime(local_time)
 
 # ✅ Display Time and GPS on OLED
-def display_data(adjusted_time, latitude, longitude, fallback=False):
+def display_data(adjusted_time, latitude, longitude, fallback=False, before_mqtt=True):
     oled.fill(0)
 
     # Display time
@@ -156,6 +152,12 @@ def display_data(adjusted_time, latitude, longitude, fallback=False):
         oled.text("Lng:", 0, 50)
         oled.text(str(longitude), 40, 50)
 
+    # Display indicator before/after MQTT
+    if before_mqtt:
+        oled.text("Before MQTT", 0, 55)
+    else:
+        oled.text("After MQTT", 0, 55)
+
     oled.show()
 
 # ✅ Main Function
@@ -166,43 +168,49 @@ def main():
     connect_wifi()
     sleep_ms(500)
     ntp.settime()
-    display_data(adjusted_time, latitude, longitude, fallback=True)
-    mqtt_client = setup_mqtt()
-
+    
+    oled.fill(0)
+    oled.text("Lat:", 0, 40)
+    oled.text(str(DEFAULT_LATITUDE), 40, 40)
+    oled.text("Lng:", 0, 50)
+    oled.text(str(DEFAULT_LONGITUDE), 40, 50)
+    oled.show()
     while True:
         buz.value(1)
 
         # ✅ Update time every loop
         adjusted_time = get_local_time()
-
+        
+        
         print("Fetching GPS data...")
 
         # ✅ GPS Data Retrieval
         if not getGPS(gps):
             print("No GPS data. Using fallback location.")
             latitude, longitude = DEFAULT_LATITUDE, DEFAULT_LONGITUDE
-            display_data(adjusted_time, latitude, longitude, fallback=True)
+            display_data(adjusted_time, latitude, longitude, fallback=True, before_mqtt=True)
         else:
-            display_data(adjusted_time, latitude, longitude, fallback=False)
+            display_data(adjusted_time, latitude, longitude, fallback=False, before_mqtt=True)
+
+        # ✅ Display data on OLED before MQTT
+        print("Displaying Data on OLED Before MQTT Connection...")
+        display_data(adjusted_time, latitude, longitude, before_mqtt=True)
+
+        # ✅ Connect to MQTT with reconnection attempts
+        mqtt_client = setup_mqtt()
 
         # ✅ Publish to MQTT
         publish_location(mqtt_client, latitude, longitude)
 
-        # ✅ Out of Border Alert
-        if latitude is not None and longitude is not None:
-            if latitude <= DEFAULT_LATITUDE or longitude <= DEFAULT_LONGITUDE:
-                buz.value(0)
-                message = f"Help needed! Location: https://www.google.com/maps?q={latitude},{longitude}&z=17&hl=en"
-                send_sms(recipient_num, sender_num, message, auth_token, account_sid)
-                
-                oled.fill(0)
-                oled.text("Out of Border", 0, 0)
-                oled.show()
-                sleep(5)
+        # ✅ Display data on OLED after MQTT
+        print("Displaying Data on OLED After MQTT Publishing...")
+        display_data(adjusted_time, latitude, longitude, before_mqtt=False)
 
         sleep(30)
 
 # ✅ Run the program
 if __name__ == "__main__":
     main()
+
+
 

@@ -201,7 +201,10 @@ def main():
         publish_location(mqtt_client, latitude, longitude)
 
         
-        if latitude <= DEFAULT_LATITUDE or longitude <= DEFAULT_LONGITUDE:
+        if latitude == DEFAULT_LATITUDE or longitude == DEFAULT_LONGITUDE:
+            buz.value(1)
+
+        else:
             buz.value(0)
             message = f"Help needed! Location: https://www.google.com/maps?q={latitude},{longitude}&z=17&hl=en"
             send_sms(recipient_num, sender_num, message, auth_token, account_sid)
