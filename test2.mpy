@@ -1,0 +1,216 @@
+import network
+from umqtt.simple import MQTTClient
+from machine import Pin, UART, SoftI2C
+import machine
+import ssd1306
+from utime import sleep, sleep_ms, time, localtime, mktime
+import ntptime as ntp
+import gc
+import urequests as requests
+
+# ✅ Adafruit IO Credentials
+ADAFRUIT_IO_URL = 'io.adafruit.com'
+ADAFRUIT_IO_USERNAME = 'YOUR_USERNAME'    # ✅ Replace with actual username
+ADAFRUIT_IO_KEY = 'YOUR_ADAFRUIT_KEY'     # ✅ Replace with actual key
+FEED_NAME = "YOUR_FEED_NAME"              # ✅ Ensure the feed exists
+
+# ✅ Twilio SMS Credentials
+recipient_num = "+91xxxxxxxxxx"
+sender_num = "+1xxxxxxxxxx"
+auth_token = "twilio_tok"
+account_sid = "twilio_ssid"
+
+# ✅ Wi-Fi Credentials
+SSID = "hello"
+PASSWORD = "hello12345"
+
+# ✅ GPS Fallback Coordinates
+DEFAULT_LATITUDE = 11.384609
+DEFAULT_LONGITUDE = 79.697655
+
+# ✅ Time Zone Offset (IST = UTC+5:30 = 19800 seconds)
+TIME_ZONE_OFFSET = 5 * 3600 + 30 * 60
+
+# ✅ Pins
+buz = Pin(16, Pin.OUT)
+led = Pin(33, Pin.OUT)
+
+# ✅ Initialize Variables
+latitude = DEFAULT_LATITUDE
+longitude = DEFAULT_LONGITUDE
+gc.collect()
+
+# ✅ I2C and OLED Display
+i2c = SoftI2C(scl=Pin(2), sda=Pin(13)) 
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+
+# ✅ GPS Module Setup
+gps = UART(1, baudrate=9600, bits=8, parity=None, stop=1, rx=15, tx=14)
+
+# ✅ Display Initialization
+oled.fill(0)
+oled.text("bps explore", 0, 0)
+oled.show()
+sleep(2)
+
+# ✅ Wi-Fi Connection
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print("Connecting to WiFi...")
+        wlan.connect(SSID, PASSWORD)
+        sleep_ms(200)
+        while not wlan.isconnected():
+            pass
+    print("Connected! IP:", wlan.ifconfig()[0])
+
+# ✅ GPS Parsing Function
+def getGPS(gpsModule):
+    global latitude, longitude
+    timeout = time() + 5  # 5-second timeout
+    while True:
+        line = gpsModule.readline()
+        if line:
+            buff = str(line)
+            parts = buff.split(',')
+            if parts[0] == "b'$GPGGA" and len(parts) == 15:
+                if all(parts[1:8]):
+                    latitude = convertToDegree(parts[2])
+                    if parts[3] == 'S':
+                        latitude = -latitude
+                    longitude = convertToDegree(parts[4])
+                    if parts[5] == 'W':
+                        longitude = -longitude
+                    print(f"GPS Data: Latitude={latitude}, Longitude={longitude}")
+                    return True
+        if time() > timeout:
+            return False
+        sleep_ms(10)
+
+# ✅ Convert GPS Coordinates to Degrees
+def convertToDegree(rawDegrees):
+    try:
+        rawAsFloat = float(rawDegrees)
+        firstdigits = int(rawAsFloat / 100)
+        nexttwodigits = rawAsFloat - float(firstdigits * 100)
+        converted = float(firstdigits + nexttwodigits / 60.0)
+        return '{0:.6f}'.format(converted)
+    except ValueError:
+        return None
+
+# ✅ MQTT Setup with Reconnection
+def setup_mqtt():
+    retries = 5
+    for attempt in range(1, retries + 1):
+        try:
+            client = MQTTClient(b'bps', ADAFRUIT_IO_URL, ADAFRUIT_IO_USERNAME, ADAFRUIT_IO_KEY, ssl=False)
+            client.connect()
+            print(f"MQTT Connected on attempt {attempt}")
+            return client
+        except OSError as e:
+            print(f"MQTT connection failed: {e}. Retrying ({attempt}/{retries})...")
+            sleep(2)
+    print("MQTT connection failed after retries. Restarting...")
+    machine.reset()  # Restart the ESP32 after multiple failures
+
+# ✅ Publish Location to MQTT
+def publish_location(client, latitude, longitude):
+    if latitude is not None and longitude is not None:
+        payload = f"{latitude},{longitude}"
+        try:
+            topic = f"{ADAFRUIT_IO_USERNAME}/feeds/{FEED_NAME}/csv"
+            client.publish(topic, payload)
+            print("Location published:", payload)
+        except Exception as e:
+            print("Error publishing location:", e)
+
+# ✅ Local Time with Time Zone Adjustment
+def get_local_time():
+    utc_time = localtime()
+    local_time = mktime(utc_time) + TIME_ZONE_OFFSET
+    return localtime(local_time)
+
+# ✅ Display Time and GPS on OLED
+def display_data(adjusted_time, latitude, longitude, fallback=False, before_mqtt=True):
+    oled.fill(0)
+
+    # Display time
+    date = f"{adjusted_time[2]:02}/{adjusted_time[1]:02}/{adjusted_time[0]}"
+    time_str = f"{adjusted_time[3]:02}:{adjusted_time[4]:02}:{adjusted_time[5]:02}"
+    oled.text("Date:", 0, 0)
+    oled.text(date, 0, 10)
+    oled.text("Time:", 0, 20)
+    oled.text(time_str, 0, 30)
+
+    # Display GPS
+    if fallback:
+        oled.text("Fallback Loc", 0, 40)
+    else:
+        oled.text("Lat:", 0, 40)
+        oled.text(str(latitude), 40, 40)
+        oled.text("Lng:", 0, 50)
+        oled.text(str(longitude), 40, 50)
+
+    # Display indicator before/after MQTT
+    if before_mqtt:
+        oled.text("Before MQTT", 0, 55)
+    else:
+        oled.text("After MQTT", 0, 55)
+
+    oled.show()
+
+# ✅ Main Function
+def main():
+    led.value(0)
+    buz.value(1)
+
+    connect_wifi()
+    sleep_ms(500)
+    ntp.settime()
+    
+    oled.fill(0)
+    oled.text("Lat:", 0, 40)
+    oled.text(str(DEFAULT_LATITUDE), 40, 40)
+    oled.text("Lng:", 0, 50)
+    oled.text(str(DEFAULT_LONGITUDE), 40, 50)
+    oled.show()
+    while True:
+        buz.value(1)
+
+        # ✅ Update time every loop
+        adjusted_time = get_local_time()
+        
+        
+        print("Fetching GPS data...")
+
+        # ✅ GPS Data Retrieval
+        if not getGPS(gps):
+            print("No GPS data. Using fallback location.")
+            latitude, longitude = DEFAULT_LATITUDE, DEFAULT_LONGITUDE
+            display_data(adjusted_time, latitude, longitude, fallback=True, before_mqtt=True)
+        else:
+            display_data(adjusted_time, latitude, longitude, fallback=False, before_mqtt=True)
+
+        # ✅ Display data on OLED before MQTT
+        print("Displaying Data on OLED Before MQTT Connection...")
+        display_data(adjusted_time, latitude, longitude, before_mqtt=True)
+
+        # ✅ Connect to MQTT with reconnection attempts
+        mqtt_client = setup_mqtt()
+
+        # ✅ Publish to MQTT
+        publish_location(mqtt_client, latitude, longitude)
+
+        # ✅ Display data on OLED after MQTT
+        print("Displaying Data on OLED After MQTT Publishing...")
+        display_data(adjusted_time, latitude, longitude, before_mqtt=False)
+
+        sleep(30)
+
+# ✅ Run the program
+if __name__ == "__main__":
+    main()
+
+
+
